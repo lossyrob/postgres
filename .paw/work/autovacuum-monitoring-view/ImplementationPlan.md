@@ -155,7 +155,7 @@ Create the backend function that produces the view’s rows, ensuring correctnes
 #### Automated Verification
 - [x] `make -C src/backend` (or full tree) succeeds.
 - [x] `pg_proc.dat` builds cleanly (no duplicate OIDs / catalog build errors).
-- [ ] `make check-world` (or at minimum `make check` for regress) passes once tests are updated.
+- [x] `make check-world` (or at minimum `make check` for regress) passes once tests are updated.
 
 ### Status
 
@@ -163,7 +163,7 @@ Phase 1 implementation is complete.
 
 - Implemented shared computation helper in `autovacuum.c` and refactored `relation_needs_vacanalyze()` to call it.
 - Added the `pg_stat_get_autovacuum_candidates()` materialized SRF, `pg_proc.dat` entry, and a focused regression test (`pg_stat_get_autovacuum_candidates`).
-- Verified with: `make -C build/src/backend -j4` and `pg_regress ... pg_stat_get_autovacuum_candidates`.
+- Verified with: `make -C build/src/test/regress check`.
 
 #### Manual Verification
 - [ ] In psql as superuser, `SELECT * FROM pg_stat_autovacuum_candidates LIMIT 5;` returns sensible rows and does not take heavyweight locks.
@@ -197,12 +197,19 @@ Expose the SRF as a `pg_catalog` collected statistics view and enforce access us
 ### Success Criteria
 
 #### Automated Verification
-- [ ] `src/backend/catalog/system_views.sql` installs cleanly during initdb / regression.
-- [ ] Regression `privileges.sql` tests (Phase 3) confirm access is denied/granted correctly.
+- [x] `src/backend/catalog/system_views.sql` installs cleanly during initdb / regression.
+- [x] Regression `privileges.sql` tests (Phase 3) confirm access is denied/granted correctly.
 
 #### Manual Verification
 - [ ] As non-member of `pg_read_all_stats`, `SELECT 1 FROM pg_stat_autovacuum_candidates;` fails with permission denied.
 - [ ] As member of `pg_read_all_stats`, the same query succeeds.
+
+### Status
+
+Phase 2 implementation is complete.
+
+- Added `pg_stat_autovacuum_candidates` to `system_views.sql` and applied `pg_read_all_stats` ACL gating for both the view and SRF.
+- Verified via `make -C build/src/test/regress check`.
 
 ---
 
@@ -269,11 +276,20 @@ Update regression tests to cover the new view/function and document the feature 
 ### Success Criteria
 
 #### Automated Verification
-- [ ] `make check` passes for updated regression tests (`rules`, `privileges`, `stats`).
+- [x] `make check` passes for updated regression tests (`rules`, `privileges`, `stats`).
 - [ ] `make -C doc` (or doc build target used in this repo) succeeds with the new `monitoring.sgml` section.
 
 #### Manual Verification
 - [ ] Grep/scan rendered docs show the view listed and described under Collected Statistics Views.
+
+### Status
+
+Phase 3 implementation is complete.
+
+- Updated `rules.sql` expected snapshot, added `privileges.sql` coverage for ACL gating, and added a `stats.sql` smoke test.
+- Updated `doc/src/sgml/monitoring.sgml` to list and document `pg_stat_autovacuum_candidates`.
+- Verified via `make -C build/src/test/regress check`.
+- Docs build attempt (`make -C build/doc`) failed locally due to missing `xmllint`; left the doc-build success criterion unchecked.
 
 ---
 
