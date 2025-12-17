@@ -694,6 +694,14 @@ GRANT EXECUTE ON FUNCTION pg_get_backend_memory_contexts() TO pg_read_all_stats;
 
 -- Statistics views
 
+CREATE VIEW pg_stat_autovacuum_candidates AS
+    SELECT * FROM pg_stat_get_autovacuum_candidates() AS S;
+
+REVOKE ALL ON pg_stat_autovacuum_candidates FROM PUBLIC;
+GRANT SELECT ON pg_stat_autovacuum_candidates TO pg_read_all_stats;
+REVOKE EXECUTE ON FUNCTION pg_stat_get_autovacuum_candidates() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_stat_get_autovacuum_candidates() TO pg_read_all_stats;
+
 CREATE VIEW pg_stat_all_tables AS
     SELECT
             C.oid AS relid,
