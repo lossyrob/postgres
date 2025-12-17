@@ -85,6 +85,7 @@
 #include "nodes/makefuncs.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
+#include "postmaster/autovacuum_shared.h"
 #include "postmaster/interrupt.h"
 #include "postmaster/postmaster.h"
 #include "storage/aio_subsys.h"
@@ -355,8 +356,6 @@ static void relation_needs_vacanalyze(Oid relid, AutoVacOpts *relopts,
 
 static void autovacuum_do_vac_analyze(autovac_table *tab,
 									  BufferAccessStrategy bstrategy);
-static AutoVacOpts *extract_autovac_opts(HeapTuple tup,
-										 TupleDesc pg_class_desc);
 static void perform_work_item(AutoVacuumWorkItem *workitem);
 static void autovac_report_activity(autovac_table *tab);
 static void autovac_report_workitem(AutoVacuumWorkItem *workitem,
@@ -2047,7 +2046,7 @@ do_autovacuum(void)
 		}
 
 		/* Fetch reloptions and the pgstat entry for this table */
-		relopts = extract_autovac_opts(tuple, pg_class_desc);
+		relopts = autovacuum_extract_autovac_opts(tuple, pg_class_desc);
 		tabentry = pgstat_fetch_stat_tabentry_ext(classForm->relisshared,
 												  relid);
 
@@ -2127,7 +2126,7 @@ do_autovacuum(void)
 		 * fetch reloptions -- if this toast table does not have them, try the
 		 * main rel
 		 */
-		relopts = extract_autovac_opts(tuple, pg_class_desc);
+		relopts = autovacuum_extract_autovac_opts(tuple, pg_class_desc);
 		if (relopts)
 			free_relopts = true;
 		else
@@ -2739,8 +2738,8 @@ deleted2:
  * we acquired the pg_class row.  If pg_class had a TOAST table, this would
  * be a risk; fortunately, it doesn't.
  */
-static AutoVacOpts *
-extract_autovac_opts(HeapTuple tup, TupleDesc pg_class_desc)
+AutoVacOpts *
+autovacuum_extract_autovac_opts(HeapTuple tup, TupleDesc pg_class_desc)
 {
 	bytea	   *relopts;
 	AutoVacOpts *av;
@@ -2793,7 +2792,7 @@ table_recheck_autovac(Oid relid, HTAB *table_toast_map,
 	 * Get the applicable reloptions.  If it is a TOAST table, try to get the
 	 * main table reloptions if the toast table itself doesn't have.
 	 */
-	avopts = extract_autovac_opts(classTup, pg_class_desc);
+	avopts = autovacuum_extract_autovac_opts(classTup, pg_class_desc);
 	if (avopts)
 		free_avopts = true;
 	else if (classForm->relkind == RELKIND_TOASTVALUE &&
@@ -2994,16 +2993,17 @@ recheck_relation_needs_vacanalyze(Oid relid,
  * value < 0 is substituted with the value of
  * autovacuum_vacuum_scale_factor GUC variable.  Ditto for analyze.
  */
-static void
-relation_needs_vacanalyze(Oid relid,
-						  AutoVacOpts *relopts,
-						  Form_pg_class classForm,
-						  PgStat_StatTabEntry *tabentry,
-						  int effective_multixact_freeze_max_age,
- /* output params below */
-						  bool *dovacuum,
-						  bool *doanalyze,
-						  bool *wraparound)
+
+void
+autovacuum_compute_candidate_metrics(Oid relid,
+								  const AutoVacOpts *relopts,
+								  Form_pg_class classForm,
+								  PgStat_StatTabEntry *tabentry,
+								  TransactionId nowXid,
+								  MultiXactId nowMxid,
+								  int effective_multixact_freeze_max_age,
+								  bool autovacuuming_active,
+								  AutovacuumCandidateMetrics *out)
 {
 	bool		force_vacuum;
 	bool		av_enabled;
@@ -3017,16 +3017,6 @@ relation_needs_vacanalyze(Oid relid,
 				vac_ins_scale_factor,
 				anl_scale_factor;
 
-	/* thresholds calculated from above constants */
-	float4		vacthresh,
-				vacinsthresh,
-				anlthresh;
-
-	/* number of vacuum (resp. analyze) tuples at this time */
-	float4		vactuples,
-				instuples,
-				anltuples;
-
 	/* freeze parameters */
 	int			freeze_max_age;
 	int			multixact_freeze_max_age;
@@ -3036,6 +3026,11 @@ relation_needs_vacanalyze(Oid relid,
 
 	Assert(classForm != NULL);
 	Assert(OidIsValid(relid));
+	Assert(out != NULL);
+
+	memset(out, 0, sizeof(*out));
+	out->autovacuuming_active = autovacuuming_active;
+	out->has_stats = (tabentry != NULL);
 
 	/*
 	 * Determine vacuum/analyze equation parameters.  We have two possible
@@ -3045,8 +3040,8 @@ relation_needs_vacanalyze(Oid relid,
 
 	/* -1 in autovac setting means use plain vacuum_scale_factor */
 	vac_scale_factor = (relopts && relopts->vacuum_scale_factor >= 0)
-		? relopts->vacuum_scale_factor
-		: autovacuum_vac_scale;
+		? (float4) relopts->vacuum_scale_factor
+		: (float4) autovacuum_vac_scale;
 
 	vac_base_thresh = (relopts && relopts->vacuum_threshold >= 0)
 		? relopts->vacuum_threshold
@@ -3058,8 +3053,8 @@ relation_needs_vacanalyze(Oid relid,
 		: autovacuum_vac_max_thresh;
 
 	vac_ins_scale_factor = (relopts && relopts->vacuum_ins_scale_factor >= 0)
-		? relopts->vacuum_ins_scale_factor
-		: autovacuum_vac_ins_scale;
+		? (float4) relopts->vacuum_ins_scale_factor
+		: (float4) autovacuum_vac_ins_scale;
 
 	/* -1 is used to disable insert vacuums */
 	vac_ins_base_thresh = (relopts && relopts->vacuum_ins_threshold >= -1)
@@ -3067,8 +3062,8 @@ relation_needs_vacanalyze(Oid relid,
 		: autovacuum_vac_ins_thresh;
 
 	anl_scale_factor = (relopts && relopts->analyze_scale_factor >= 0)
-		? relopts->analyze_scale_factor
-		: autovacuum_anl_scale;
+		? (float4) relopts->analyze_scale_factor
+		: (float4) autovacuum_anl_scale;
 
 	anl_base_thresh = (relopts && relopts->analyze_threshold >= 0)
 		? relopts->analyze_threshold
@@ -3082,10 +3077,14 @@ relation_needs_vacanalyze(Oid relid,
 		? Min(relopts->multixact_freeze_max_age, effective_multixact_freeze_max_age)
 		: effective_multixact_freeze_max_age;
 
+	out->freeze_max_age = freeze_max_age;
+	out->multixact_freeze_max_age = multixact_freeze_max_age;
+
 	av_enabled = (relopts ? relopts->enabled : true);
+	out->autovacuum_enabled = av_enabled;
 
 	/* Force vacuum if table is at risk of wraparound */
-	xidForceLimit = recentXid - freeze_max_age;
+	xidForceLimit = nowXid - freeze_max_age;
 	if (xidForceLimit < FirstNormalTransactionId)
 		xidForceLimit -= FirstNormalTransactionId;
 	relfrozenxid = classForm->relfrozenxid;
@@ -3095,97 +3094,160 @@ relation_needs_vacanalyze(Oid relid,
 	{
 		MultiXactId relminmxid = classForm->relminmxid;
 
-		multiForceLimit = recentMulti - multixact_freeze_max_age;
+		multiForceLimit = nowMxid - multixact_freeze_max_age;
 		if (multiForceLimit < FirstMultiXactId)
 			multiForceLimit -= FirstMultiXactId;
 		force_vacuum = MultiXactIdIsValid(relminmxid) &&
 			MultiXactIdPrecedes(relminmxid, multiForceLimit);
 	}
-	*wraparound = force_vacuum;
+	out->wraparound_forced = force_vacuum;
+
+	/* ages are monitoring-only; clamp unknown values to zero */
+	if (TransactionIdIsNormal(relfrozenxid))
+	{
+		uint32		xid_age_u32 = nowXid - relfrozenxid;
+
+		out->xid_age = (xid_age_u32 > (uint32) PG_INT32_MAX)
+			? PG_INT32_MAX
+			: (int32) xid_age_u32;
+	}
+	else
+		out->xid_age = 0;
+
+	if (MultiXactIdIsValid(classForm->relminmxid))
+	{
+		uint32		mxid_age_u32 = nowMxid - classForm->relminmxid;
+
+		out->mxid_age = (mxid_age_u32 > (uint32) PG_INT32_MAX)
+			? PG_INT32_MAX
+			: (int32) mxid_age_u32;
+	}
+	else
+		out->mxid_age = 0;
+
+	/* stats counters (for monitoring output) */
+	if (tabentry)
+	{
+		out->dead_tuples = (int64) tabentry->dead_tuples;
+		out->ins_since_vacuum = (int64) tabentry->ins_since_vacuum;
+		out->mod_since_analyze = (int64) tabentry->mod_since_analyze;
+	}
+
+	/*
+	 * Compute reltuples and percentage of unfrozen pages for insert-vacuum
+	 * threshold calculations.  Keep semantics aligned with autovacuum.
+	 */
+	{
+		float4		reltuples = classForm->reltuples;
+		int32		relpages = classForm->relpages;
+		int32		relallfrozen = classForm->relallfrozen;
+
+		if (reltuples < 0)
+			reltuples = 0;
+		out->reltuples = reltuples;
+		out->pct_unfrozen = 1;
+
+		if (relpages > 0 && relallfrozen > 0)
+		{
+			relallfrozen = Min(relallfrozen, relpages);
+			out->pct_unfrozen = 1 - ((float4) relallfrozen / relpages);
+		}
+
+		out->vacuum_threshold = (float4) vac_base_thresh +
+			vac_scale_factor * reltuples;
+		if (vac_max_thresh >= 0 &&
+			out->vacuum_threshold > (float4) vac_max_thresh)
+			out->vacuum_threshold = (float4) vac_max_thresh;
+
+		out->vacuum_insert_enabled = (vac_ins_base_thresh >= 0);
+		out->vacuum_insert_threshold = (float4) vac_ins_base_thresh +
+			vac_ins_scale_factor * reltuples * out->pct_unfrozen;
+		out->analyze_threshold = (float4) anl_base_thresh +
+			anl_scale_factor * reltuples;
+	}
 
 	/* User disabled it in pg_class.reloptions?  (But ignore if at risk) */
 	if (!av_enabled && !force_vacuum)
 	{
-		*doanalyze = false;
-		*dovacuum = false;
+		out->vacuum_due = false;
+		out->analyze_due = false;
 		return;
 	}
 
 	/*
 	 * If we found stats for the table, and autovacuum is currently enabled,
-	 * make a threshold-based decision whether to vacuum and/or analyze.  If
-	 * autovacuum is currently disabled, we must be here for anti-wraparound
-	 * vacuuming only, so don't vacuum (or analyze) anything that's not being
-	 * forced.
+	 * make a threshold-based decision whether to vacuum and/or analyze.
 	 */
-	if (tabentry && AutoVacuumingActive())
+	if (tabentry && autovacuuming_active)
 	{
-		float4		pcnt_unfrozen = 1;
-		float4		reltuples = classForm->reltuples;
-		int32		relpages = classForm->relpages;
-		int32		relallfrozen = classForm->relallfrozen;
+		float4		vactuples = tabentry->dead_tuples;
+		float4		instuples = tabentry->ins_since_vacuum;
+		float4		anltuples = tabentry->mod_since_analyze;
 
-		vactuples = tabentry->dead_tuples;
-		instuples = tabentry->ins_since_vacuum;
-		anltuples = tabentry->mod_since_analyze;
-
-		/* If the table hasn't yet been vacuumed, take reltuples as zero */
-		if (reltuples < 0)
-			reltuples = 0;
-
-		/*
-		 * If we have data for relallfrozen, calculate the unfrozen percentage
-		 * of the table to modify insert scale factor. This helps us decide
-		 * whether or not to vacuum an insert-heavy table based on the number
-		 * of inserts to the more "active" part of the table.
-		 */
-		if (relpages > 0 && relallfrozen > 0)
-		{
-			/*
-			 * It could be the stats were updated manually and relallfrozen >
-			 * relpages. Clamp relallfrozen to relpages to avoid nonsensical
-			 * calculations.
-			 */
-			relallfrozen = Min(relallfrozen, relpages);
-			pcnt_unfrozen = 1 - ((float4) relallfrozen / relpages);
-		}
-
-		vacthresh = (float4) vac_base_thresh + vac_scale_factor * reltuples;
-		if (vac_max_thresh >= 0 && vacthresh > (float4) vac_max_thresh)
-			vacthresh = (float4) vac_max_thresh;
-
-		vacinsthresh = (float4) vac_ins_base_thresh +
-			vac_ins_scale_factor * reltuples * pcnt_unfrozen;
-		anlthresh = (float4) anl_base_thresh + anl_scale_factor * reltuples;
-
-		if (vac_ins_base_thresh >= 0)
-			elog(DEBUG3, "%s: vac: %.0f (threshold %.0f), ins: %.0f (threshold %.0f), anl: %.0f (threshold %.0f)",
-				 NameStr(classForm->relname),
-				 vactuples, vacthresh, instuples, vacinsthresh, anltuples, anlthresh);
-		else
-			elog(DEBUG3, "%s: vac: %.0f (threshold %.0f), ins: (disabled), anl: %.0f (threshold %.0f)",
-				 NameStr(classForm->relname),
-				 vactuples, vacthresh, anltuples, anlthresh);
-
-		/* Determine if this table needs vacuum or analyze. */
-		*dovacuum = force_vacuum || (vactuples > vacthresh) ||
-			(vac_ins_base_thresh >= 0 && instuples > vacinsthresh);
-		*doanalyze = (anltuples > anlthresh);
+		out->vacuum_due = force_vacuum || (vactuples > out->vacuum_threshold) ||
+			(out->vacuum_insert_enabled &&
+			 instuples > out->vacuum_insert_threshold);
+		out->analyze_due = (anltuples > out->analyze_threshold);
 	}
 	else
 	{
-		/*
-		 * Skip a table not found in stat hash, unless we have to force vacuum
-		 * for anti-wrap purposes.  If it's not acted upon, there's no need to
-		 * vacuum it.
-		 */
-		*dovacuum = force_vacuum;
-		*doanalyze = false;
+		/* anti-wraparound vacuuming only */
+		out->vacuum_due = force_vacuum;
+		out->analyze_due = false;
 	}
+
+	/* toast is never autoanalyzed */
+	if (classForm->relkind == RELKIND_TOASTVALUE)
+		out->analyze_due = false;
 
 	/* ANALYZE refuses to work with pg_statistic */
 	if (relid == StatisticRelationId)
-		*doanalyze = false;
+		out->analyze_due = false;
+}
+
+static void
+relation_needs_vacanalyze(Oid relid,
+						  AutoVacOpts *relopts,
+						  Form_pg_class classForm,
+						  PgStat_StatTabEntry *tabentry,
+						  int effective_multixact_freeze_max_age,
+ /* output params below */
+						  bool *dovacuum,
+						  bool *doanalyze,
+						  bool *wraparound)
+{
+	AutovacuumCandidateMetrics metrics;
+	bool		av_active = AutoVacuumingActive();
+
+	autovacuum_compute_candidate_metrics(relid, relopts, classForm, tabentry,
+								  recentXid, recentMulti,
+								  effective_multixact_freeze_max_age,
+								  av_active,
+								  &metrics);
+
+	*wraparound = metrics.wraparound_forced;
+	*dovacuum = metrics.vacuum_due;
+	*doanalyze = metrics.analyze_due;
+
+	/* Maintain existing debug logging behavior for autovacuum scheduling. */
+	if (tabentry && av_active)
+	{
+		float4		vactuples = tabentry->dead_tuples;
+		float4		instuples = tabentry->ins_since_vacuum;
+		float4		anltuples = tabentry->mod_since_analyze;
+
+		if (metrics.vacuum_insert_enabled)
+			elog(DEBUG3, "%s: vac: %.0f (threshold %.0f), ins: %.0f (threshold %.0f), anl: %.0f (threshold %.0f)",
+				 NameStr(classForm->relname),
+				 vactuples, metrics.vacuum_threshold,
+				 instuples, metrics.vacuum_insert_threshold,
+				 anltuples, metrics.analyze_threshold);
+		else
+			elog(DEBUG3, "%s: vac: %.0f (threshold %.0f), ins: (disabled), anl: %.0f (threshold %.0f)",
+				 NameStr(classForm->relname),
+				 vactuples, metrics.vacuum_threshold,
+				 anltuples, metrics.analyze_threshold);
+	}
 }
 
 /*

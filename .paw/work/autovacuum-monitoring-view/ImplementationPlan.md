@@ -153,9 +153,17 @@ Create the backend function that produces the view’s rows, ensuring correctnes
 ### Success Criteria
 
 #### Automated Verification
-- [ ] `make -C src/backend` (or full tree) succeeds.
-- [ ] `pg_proc.dat` builds cleanly (no duplicate OIDs / catalog build errors).
+- [x] `make -C src/backend` (or full tree) succeeds.
+- [x] `pg_proc.dat` builds cleanly (no duplicate OIDs / catalog build errors).
 - [ ] `make check-world` (or at minimum `make check` for regress) passes once tests are updated.
+
+### Status
+
+Phase 1 implementation is complete.
+
+- Implemented shared computation helper in `autovacuum.c` and refactored `relation_needs_vacanalyze()` to call it.
+- Added the `pg_stat_get_autovacuum_candidates()` materialized SRF, `pg_proc.dat` entry, and a focused regression test (`pg_stat_get_autovacuum_candidates`).
+- Verified with: `make -C build/src/backend -j4` and `pg_regress ... pg_stat_get_autovacuum_candidates`.
 
 #### Manual Verification
 - [ ] In psql as superuser, `SELECT * FROM pg_stat_autovacuum_candidates LIMIT 5;` returns sensible rows and does not take heavyweight locks.

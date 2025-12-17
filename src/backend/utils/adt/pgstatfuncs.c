@@ -14,27 +14,43 @@
  */
 #include "postgres.h"
 
+#include "access/heapam.h"
 #include "access/htup_details.h"
+#include "access/table.h"
+#include "access/transam.h"
 #include "access/xlog.h"
 #include "access/xlogprefetcher.h"
 #include "catalog/catalog.h"
 #include "catalog/pg_authid.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_namespace.h"
+#include "catalog/pg_statistic.h"
 #include "catalog/pg_type.h"
 #include "common/ip.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "postmaster/autovacuum.h"
+#include "postmaster/autovacuum_shared.h"
 #include "postmaster/bgworker.h"
 #include "replication/logicallauncher.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/hsearch.h"
+#include "utils/lsyscache.h"
 #include "utils/timestamp.h"
 
 #define UINT32_ACCESS_ONCE(var)		 ((uint32)(*((volatile uint32 *)&(var))))
 
 #define HAS_PGSTAT_PERMISSIONS(role)	 (has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS) || has_privs_of_role(GetUserId(), role))
+
+typedef struct AutovacToastReloptsEntry
+{
+	Oid			toastrelid;
+	AutoVacOpts	relopts;
+} AutovacToastReloptsEntry;
 
 #define PG_STAT_GET_RELENTRY_INT64(stat)						\
 Datum															\
@@ -341,6 +357,272 @@ pg_stat_get_progress_info(PG_FUNCTION_ARGS)
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 	}
+
+	return (Datum) 0;
+}
+
+/*
+ * Returns per-relation autovacuum threshold inputs and computed decisions for
+ * monitoring. This does not change autovacuum behavior.
+ */
+Datum
+pg_stat_get_autovacuum_candidates(PG_FUNCTION_ARGS)
+{
+#define PG_STAT_GET_AUTOVAC_CANDIDATE_COLS	27
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Relation	classRel;
+	TupleDesc	pg_class_desc;
+	TableScanDesc scan;
+	HeapTuple	tuple;
+	HTAB	   *toastrelopts;
+	HASHCTL		ctl;
+	TransactionId nowXid;
+	MultiXactId	nowMxid;
+	int			effective_multixact_freeze_max_age;
+	bool		autovacuuming_active;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	classRel = table_open(RelationRelationId, AccessShareLock);
+	pg_class_desc = RelationGetDescr(classRel);
+
+	/*
+	 * Build a mapping from toast relation OID -> parent autovacuum reloptions,
+	 * mirroring autovacuum's "fallback to parent" behavior for TOAST tables.
+	 */
+	memset(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(Oid);
+	ctl.entrysize = sizeof(AutovacToastReloptsEntry);
+	toastrelopts = hash_create("autovacuum toast reloptions",
+						128, &ctl, HASH_ELEM | HASH_BLOBS);
+
+	scan = table_beginscan_catalog(classRel, 0, NULL);
+	while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+	{
+		Form_pg_class classForm = (Form_pg_class) GETSTRUCT(tuple);
+		Oid			toastrelid;
+		AutoVacOpts *parent_opts;
+		AutovacToastReloptsEntry *entry;
+		bool		found;
+
+		if (classForm->relpersistence == RELPERSISTENCE_TEMP)
+			continue;
+		if (classForm->relkind != RELKIND_RELATION &&
+			classForm->relkind != RELKIND_MATVIEW)
+			continue;
+		toastrelid = classForm->reltoastrelid;
+		if (!OidIsValid(toastrelid))
+			continue;
+
+		parent_opts = autovacuum_extract_autovac_opts(tuple, pg_class_desc);
+		if (!parent_opts)
+			continue;
+
+		entry = (AutovacToastReloptsEntry *) hash_search(toastrelopts,
+												 &toastrelid, HASH_ENTER, &found);
+		entry->toastrelid = toastrelid;
+		entry->relopts = *parent_opts;
+		pfree(parent_opts);
+	}
+	table_endscan(scan);
+
+	nowXid = ReadNextTransactionId();
+	nowMxid = ReadNextMultiXactId();
+	effective_multixact_freeze_max_age = MultiXactMemberFreezeThreshold();
+	autovacuuming_active = AutoVacuumingActive();
+
+	scan = table_beginscan_catalog(classRel, 0, NULL);
+	while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+	{
+		Form_pg_class classForm = (Form_pg_class) GETSTRUCT(tuple);
+		Oid			relid;
+		AutoVacOpts *relopts_palloc = NULL;
+		const AutoVacOpts *relopts = NULL;
+		PgStat_StatTabEntry *tabentry;
+		AutovacuumCandidateMetrics metrics;
+		Datum		values[PG_STAT_GET_AUTOVAC_CANDIDATE_COLS] = {0};
+		bool		nulls[PG_STAT_GET_AUTOVAC_CANDIDATE_COLS] = {0};
+		char	   *nspname;
+		double		vacuum_dead_ratio;
+		double		vacuum_insert_ratio;
+		double		analyze_ratio;
+		double		xid_age_ratio;
+		double		mxid_age_ratio;
+		double		score = -1.0;
+		const char *reason = NULL;
+		bool		vacuum_dead_ratio_null = true;
+		bool		vacuum_insert_ratio_null = true;
+		bool		analyze_ratio_null = true;
+
+		/* eligible relation kinds only */
+		if (classForm->relpersistence == RELPERSISTENCE_TEMP)
+			continue;
+		if (classForm->relkind != RELKIND_RELATION &&
+			classForm->relkind != RELKIND_MATVIEW &&
+			classForm->relkind != RELKIND_TOASTVALUE)
+			continue;
+		if (classForm->relkind == RELKIND_PARTITIONED_TABLE)
+			continue;
+
+		relid = classForm->oid;
+
+		/* Compute effective reloptions, with TOAST fallback to parent. */
+		relopts_palloc = autovacuum_extract_autovac_opts(tuple, pg_class_desc);
+		if (relopts_palloc)
+			relopts = relopts_palloc;
+		else if (classForm->relkind == RELKIND_TOASTVALUE)
+		{
+			AutovacToastReloptsEntry *entry;
+			bool		found;
+
+			entry = (AutovacToastReloptsEntry *) hash_search(toastrelopts,
+												 &relid, HASH_FIND, &found);
+			if (found)
+				relopts = &entry->relopts;
+		}
+
+		/* fetch the pgstat table entry */
+		tabentry = pgstat_fetch_stat_tabentry_ext(classForm->relisshared, relid);
+
+		autovacuum_compute_candidate_metrics(relid, relopts, classForm, tabentry,
+									 nowXid, nowMxid,
+									 effective_multixact_freeze_max_age,
+									 autovacuuming_active,
+									 &metrics);
+
+		if (tabentry)
+			pfree(tabentry);
+		if (relopts_palloc)
+			pfree(relopts_palloc);
+
+		/* identity */
+		values[0] = ObjectIdGetDatum(relid);
+		nspname = get_namespace_name(classForm->relnamespace);
+		if (nspname)
+		{
+			values[1] = DirectFunctionCall1(namein, CStringGetDatum(nspname));
+			pfree(nspname);
+		}
+		else
+			nulls[1] = true;
+		values[2] = DirectFunctionCall1(namein, CStringGetDatum(NameStr(classForm->relname)));
+		values[3] = CharGetDatum(classForm->relkind);
+
+		/* eligibility/config */
+		values[4] = BoolGetDatum(metrics.autovacuum_enabled);
+		values[5] = BoolGetDatum(metrics.has_stats);
+		values[6] = BoolGetDatum(metrics.autovacuuming_active);
+
+		/* counters (NULL when stats missing) */
+		if (metrics.has_stats)
+		{
+			values[7] = Int64GetDatum(metrics.dead_tuples);
+			values[8] = Int64GetDatum(metrics.ins_since_vacuum);
+			values[9] = Int64GetDatum(metrics.mod_since_analyze);
+		}
+		else
+		{
+			nulls[7] = true;
+			nulls[8] = true;
+			nulls[9] = true;
+		}
+		values[10] = Float4GetDatum(metrics.reltuples);
+		values[11] = Float4GetDatum(metrics.pct_unfrozen);
+
+		/* thresholds */
+		values[12] = Float4GetDatum(metrics.vacuum_threshold);
+		if (metrics.vacuum_insert_enabled)
+			values[13] = Float4GetDatum(metrics.vacuum_insert_threshold);
+		else
+			nulls[13] = true;
+		if (classForm->relkind == RELKIND_TOASTVALUE)
+			nulls[14] = true;
+		else
+			values[14] = Float4GetDatum(metrics.analyze_threshold);
+
+		/* wraparound context */
+		values[15] = Int32GetDatum(metrics.xid_age);
+		values[16] = Int32GetDatum(metrics.freeze_max_age);
+		values[17] = Int32GetDatum(metrics.mxid_age);
+		values[18] = Int32GetDatum(metrics.multixact_freeze_max_age);
+
+		/* decisions */
+		values[19] = BoolGetDatum(metrics.vacuum_due);
+		values[20] = BoolGetDatum(metrics.analyze_due);
+		values[21] = BoolGetDatum(metrics.wraparound_forced);
+
+		/* ratios */
+		if (metrics.has_stats && metrics.vacuum_threshold > 0)
+		{
+			vacuum_dead_ratio = (double) metrics.dead_tuples /
+				(double) metrics.vacuum_threshold;
+			values[22] = Float8GetDatum(vacuum_dead_ratio);
+			vacuum_dead_ratio_null = false;
+		}
+		else
+			nulls[22] = true;
+
+		if (metrics.has_stats && metrics.vacuum_insert_enabled &&
+			metrics.vacuum_insert_threshold > 0)
+		{
+			vacuum_insert_ratio = (double) metrics.ins_since_vacuum /
+				(double) metrics.vacuum_insert_threshold;
+			values[23] = Float8GetDatum(vacuum_insert_ratio);
+			vacuum_insert_ratio_null = false;
+		}
+		else
+			nulls[23] = true;
+
+		if (metrics.has_stats && classForm->relkind != RELKIND_TOASTVALUE &&
+			relid != StatisticRelationId && metrics.analyze_threshold > 0)
+		{
+			analyze_ratio = (double) metrics.mod_since_analyze /
+				(double) metrics.analyze_threshold;
+			values[24] = Float8GetDatum(analyze_ratio);
+			analyze_ratio_null = false;
+		}
+		else
+			nulls[24] = true;
+
+		xid_age_ratio = (metrics.freeze_max_age > 0)
+			? ((double) metrics.xid_age / (double) metrics.freeze_max_age)
+			: 0.0;
+		mxid_age_ratio = (metrics.multixact_freeze_max_age > 0)
+			? ((double) metrics.mxid_age /
+			   (double) metrics.multixact_freeze_max_age)
+			: 0.0;
+
+		/* Choose score and reason with stable tie-breaking precedence. */
+		score = xid_age_ratio;
+		reason = "wraparound_xid";
+		if (mxid_age_ratio > score)
+		{
+			score = mxid_age_ratio;
+			reason = "wraparound_mxid";
+		}
+		if (!vacuum_dead_ratio_null && vacuum_dead_ratio > score)
+		{
+			score = vacuum_dead_ratio;
+			reason = "vacuum_dead";
+		}
+		if (!vacuum_insert_ratio_null && vacuum_insert_ratio > score)
+		{
+			score = vacuum_insert_ratio;
+			reason = "vacuum_insert";
+		}
+		if (!analyze_ratio_null && analyze_ratio > score)
+		{
+			score = analyze_ratio;
+			reason = "analyze";
+		}
+
+		values[25] = Float8GetDatum(score);
+		values[26] = CStringGetTextDatum(reason);
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	table_endscan(scan);
+	table_close(classRel, AccessShareLock);
 
 	return (Datum) 0;
 }
