@@ -1967,6 +1967,13 @@ SELECT has_table_privilege('regress_readallstats','pg_backend_memory_contexts','
 SELECT has_table_privilege('regress_readallstats','pg_shmem_allocations','SELECT'); -- no
 SELECT has_table_privilege('regress_readallstats','pg_shmem_allocations_numa','SELECT'); -- no
 SELECT has_table_privilege('regress_readallstats','pg_dsm_registry_allocations','SELECT'); -- no
+SELECT has_table_privilege('regress_readallstats','pg_stat_autovacuum_candidates','SELECT'); -- no
+SELECT has_function_privilege('regress_readallstats','pg_stat_get_autovacuum_candidates()','EXECUTE'); -- no
+
+-- Ensure ACL gating denies access (not just masked rows)
+SET ROLE regress_readallstats;
+SELECT COUNT(*) >= 0 AS ok FROM pg_stat_autovacuum_candidates; -- fail
+RESET ROLE;
 
 GRANT pg_read_all_stats TO regress_readallstats;
 
@@ -1975,12 +1982,15 @@ SELECT has_table_privilege('regress_readallstats','pg_backend_memory_contexts','
 SELECT has_table_privilege('regress_readallstats','pg_shmem_allocations','SELECT'); -- yes
 SELECT has_table_privilege('regress_readallstats','pg_shmem_allocations_numa','SELECT'); -- yes
 SELECT has_table_privilege('regress_readallstats','pg_dsm_registry_allocations','SELECT'); -- yes
+SELECT has_table_privilege('regress_readallstats','pg_stat_autovacuum_candidates','SELECT'); -- yes
+SELECT has_function_privilege('regress_readallstats','pg_stat_get_autovacuum_candidates()','EXECUTE'); -- yes
 
 -- run query to ensure that functions within views can be executed
 SET ROLE regress_readallstats;
 SELECT COUNT(*) >= 0 AS ok FROM pg_aios;
 SELECT COUNT(*) >= 0 AS ok FROM pg_backend_memory_contexts;
 SELECT COUNT(*) >= 0 AS ok FROM pg_shmem_allocations;
+SELECT COUNT(*) >= 0 AS ok FROM pg_stat_autovacuum_candidates;
 RESET ROLE;
 
 -- clean up

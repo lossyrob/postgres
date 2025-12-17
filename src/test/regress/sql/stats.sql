@@ -944,4 +944,30 @@ SELECT * FROM check_estimated_rows('SELECT * FROM table_fillfactor');
 
 DROP TABLE table_fillfactor;
 
+-- Smoke-test pg_stat_autovacuum_candidates (view wrapper + SRF)
+CREATE TABLE avc_stats_test(id int);
+ALTER TABLE avc_stats_test SET (
+  autovacuum_vacuum_threshold = 10,
+  autovacuum_vacuum_scale_factor = 0,
+  autovacuum_vacuum_insert_threshold = 10,
+  autovacuum_vacuum_insert_scale_factor = 0,
+  autovacuum_analyze_threshold = 10,
+  autovacuum_analyze_scale_factor = 0
+);
+
+VACUUM (ANALYZE) avc_stats_test;
+INSERT INTO avc_stats_test SELECT generate_series(1, 11);
+
+SELECT pg_stat_force_next_flush();
+CHECKPOINT;
+
+SELECT relname,
+       vacuum_due,
+       round(vacuum_insert_ratio::numeric, 2) AS vacuum_insert_ratio,
+       autovacuum_priority_reason
+FROM pg_stat_autovacuum_candidates
+WHERE relid = 'avc_stats_test'::regclass;
+
+DROP TABLE avc_stats_test;
+
 -- End of Stats Test

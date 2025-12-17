@@ -1,0 +1,64 @@
+CREATE TABLE av_test(id int);
+ALTER TABLE av_test SET (
+  autovacuum_vacuum_threshold = 10,
+  autovacuum_vacuum_scale_factor = 0,
+  autovacuum_vacuum_insert_threshold = 10,
+  autovacuum_vacuum_insert_scale_factor = 0,
+  autovacuum_analyze_threshold = 10,
+  autovacuum_analyze_scale_factor = 0
+);
+
+VACUUM (ANALYZE) av_test;
+
+INSERT INTO av_test SELECT generate_series(1, 11);
+
+SELECT pg_stat_force_next_flush();
+CHECKPOINT;
+
+SELECT relname,
+       vacuum_threshold::int AS vacuum_threshold,
+       vacuum_insert_threshold::int AS vacuum_insert_threshold,
+       analyze_threshold::int AS analyze_threshold,
+       ins_since_vacuum,
+       round(vacuum_insert_ratio::numeric, 2) AS vacuum_insert_ratio,
+       vacuum_due,
+       round(autovacuum_priority_score::numeric, 2) AS autovacuum_priority_score,
+       autovacuum_priority_reason
+FROM pg_stat_get_autovacuum_candidates()
+WHERE schemaname = 'public' AND relname = 'av_test';
+
+ALTER TABLE av_test SET (autovacuum_vacuum_insert_threshold = -1);
+
+SELECT pg_stat_force_next_flush();
+CHECKPOINT;
+
+SELECT relname,
+       vacuum_insert_threshold IS NULL AS insert_thresh_null,
+       vacuum_insert_ratio IS NULL AS insert_ratio_null
+FROM pg_stat_get_autovacuum_candidates()
+WHERE schemaname = 'public' AND relname = 'av_test';
+
+CREATE TABLE av_test_toast(t text);
+ALTER TABLE av_test_toast SET (
+  autovacuum_vacuum_threshold = 10,
+  autovacuum_vacuum_scale_factor = 0,
+  autovacuum_analyze_threshold = 10,
+  autovacuum_analyze_scale_factor = 0
+);
+
+INSERT INTO av_test_toast VALUES (repeat('x', 100000));
+
+SELECT pg_stat_force_next_flush();
+CHECKPOINT;
+
+SELECT s.relkind,
+       s.vacuum_threshold::int AS vacuum_threshold,
+       s.analyze_due,
+       s.analyze_threshold IS NULL AS analyze_thresh_null
+FROM pg_class p
+JOIN pg_class c ON c.oid = p.reltoastrelid
+JOIN pg_stat_get_autovacuum_candidates() s ON s.relid = c.oid
+WHERE p.relname = 'av_test_toast' AND p.relnamespace = 'public'::regnamespace;
+
+DROP TABLE av_test_toast;
+DROP TABLE av_test;

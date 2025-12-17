@@ -538,6 +538,17 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
       </entry>
      </row>
 
+       <row>
+        <entry><structname>pg_stat_autovacuum_candidates</structname><indexterm><primary>pg_stat_autovacuum_candidates</primary></indexterm></entry>
+        <entry>
+         One row for each relation in the current database that is eligible
+         for autovacuum (including TOAST tables), showing the raw statistics
+         and computed thresholds used for autovacuum decision-making.
+         See <link linkend="monitoring-pg-stat-autovacuum-candidates-view">
+         <structname>pg_stat_autovacuum_candidates</structname></link> for details.
+        </entry>
+       </row>
+
      <row>
       <entry><structname>pg_stat_sys_tables</structname><indexterm><primary>pg_stat_sys_tables</primary></indexterm></entry>
       <entry>Same as <structname>pg_stat_all_tables</structname>, except that only
@@ -4185,6 +4196,313 @@ description | Waiting for a newly initialized WAL file to reach durable storage
     </tbody>
    </tgroup>
   </table>
+
+ </sect2>
+
+ <sect2 id="monitoring-pg-stat-autovacuum-candidates-view">
+  <title><structname>pg_stat_autovacuum_candidates</structname></title>
+
+  <indexterm>
+   <primary>pg_stat_autovacuum_candidates</primary>
+  </indexterm>
+
+  <para>
+   The <structname>pg_stat_autovacuum_candidates</structname> view contains
+   one row for each relation in the current database that is eligible for
+   autovacuum (ordinary tables, materialized views, and TOAST tables).
+   It exposes the raw churn counters and the computed thresholds used by
+   autovacuum to decide when to run <command>VACUUM</command> and
+   <command>ANALYZE</command>, plus monitoring-only ratios and a sortable
+   priority score.
+  </para>
+
+  <para>
+   Access to this view is restricted to superusers and roles with privileges
+   of built-in role <link linkend="predefined-role-pg-monitor"><literal>pg_read_all_stats</literal></link>.
+  </para>
+
+    <table id="pg-stat-autovacuum-candidates-view" xreflabel="pg_stat_autovacuum_candidates">
+     <title><structname>pg_stat_autovacuum_candidates</structname> View</title>
+     <tgroup cols="1">
+      <thead>
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         Column Type
+        </para>
+        <para>
+         Description
+        </para></entry>
+       </row>
+      </thead>
+
+      <tbody>
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>relid</structfield> <type>oid</type>
+        </para>
+        <para>
+         OID of the relation
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>schemaname</structfield> <type>name</type>
+        </para>
+        <para>
+         Name of the schema that this relation is in
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>relname</structfield> <type>name</type>
+        </para>
+        <para>
+         Name of this relation
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>relkind</structfield> <type>"char"</type>
+        </para>
+        <para>
+         Relation kind (<literal>r</literal> for ordinary tables,
+         <literal>m</literal> for materialized views, <literal>t</literal> for
+         TOAST tables)
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>autovacuum_enabled</structfield> <type>boolean</type>
+        </para>
+        <para>
+         Whether autovacuum is enabled for this relation via reloptions
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>has_stats</structfield> <type>boolean</type>
+        </para>
+        <para>
+         Whether collected statistics are available for this relation
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>autovacuuming_active</structfield> <type>boolean</type>
+        </para>
+        <para>
+         Whether autovacuuming is enabled in the current server configuration
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>dead_tuples</structfield> <type>bigint</type>
+        </para>
+        <para>
+         Estimated number of dead tuples in the relation (used for VACUUM
+         threshold decisions)
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>ins_since_vacuum</structfield> <type>bigint</type>
+        </para>
+        <para>
+         Number of tuples inserted since the last VACUUM of this relation
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>mod_since_analyze</structfield> <type>bigint</type>
+        </para>
+        <para>
+         Number of tuples modified since the last ANALYZE of this relation
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>reltuples</structfield> <type>real</type>
+        </para>
+        <para>
+         Estimated number of live tuples used when computing thresholds
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>pct_unfrozen</structfield> <type>real</type>
+        </para>
+        <para>
+         Estimated fraction of pages that are not all-frozen, used when
+         computing the insert-trigger VACUUM threshold
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>vacuum_threshold</structfield> <type>real</type>
+        </para>
+        <para>
+         Threshold for dead tuples above which autovacuum would consider
+         <command>VACUUM</command> due
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>vacuum_insert_threshold</structfield> <type>real</type>
+        </para>
+        <para>
+         Threshold for inserted tuples above which autovacuum would consider
+         <command>VACUUM</command> due; <literal>NULL</literal> when the
+         insert-trigger <command>VACUUM</command> mechanism is disabled
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>analyze_threshold</structfield> <type>real</type>
+        </para>
+        <para>
+         Threshold for modified tuples above which autovacuum would consider
+         <command>ANALYZE</command> due; for TOAST tables this is always
+         <literal>NULL</literal>
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>xid_age</structfield> <type>integer</type>
+        </para>
+        <para>
+         Age of the relation's <structfield>relfrozenxid</structfield>
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>freeze_max_age</structfield> <type>integer</type>
+        </para>
+        <para>
+         Effective maximum age before VACUUM is forced to prevent transaction ID
+         wraparound
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>mxid_age</structfield> <type>integer</type>
+        </para>
+        <para>
+         Age of the relation's <structfield>relminmxid</structfield>
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>multixact_freeze_max_age</structfield> <type>integer</type>
+        </para>
+        <para>
+         Effective maximum multixact age before VACUUM is forced to prevent
+         multixact ID wraparound
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>vacuum_due</structfield> <type>boolean</type>
+        </para>
+        <para>
+         Whether autovacuum would currently consider <command>VACUUM</command>
+         due for this relation
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>analyze_due</structfield> <type>boolean</type>
+        </para>
+        <para>
+         Whether autovacuum would currently consider <command>ANALYZE</command>
+         due for this relation
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>wraparound_forced</structfield> <type>boolean</type>
+        </para>
+        <para>
+         Whether <command>VACUUM</command> is forced to prevent transaction ID
+         or multixact ID wraparound
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>vacuum_dead_ratio</structfield> <type>double precision</type>
+        </para>
+        <para>
+         Ratio of <structfield>dead_tuples</structfield> to
+         <structfield>vacuum_threshold</structfield> (<literal>NULL</literal>
+         if no statistics are available)
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>vacuum_insert_ratio</structfield> <type>double precision</type>
+        </para>
+        <para>
+         Ratio of <structfield>ins_since_vacuum</structfield> to
+         <structfield>vacuum_insert_threshold</structfield>
+         (<literal>NULL</literal> if disabled or if no statistics are available)
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>analyze_ratio</structfield> <type>double precision</type>
+        </para>
+        <para>
+         Ratio of <structfield>mod_since_analyze</structfield> to
+         <structfield>analyze_threshold</structfield> (<literal>NULL</literal>
+         if no statistics are available or if analyze is not applicable)
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>autovacuum_priority_score</structfield> <type>double precision</type>
+        </para>
+        <para>
+         Monitoring-only priority score derived from the maximum of the ratios
+         shown in this view, including wraparound-related age ratios
+        </para></entry>
+       </row>
+
+       <row>
+        <entry role="catalog_table_entry"><para role="column_definition">
+         <structfield>autovacuum_priority_reason</structfield> <type>text</type>
+        </para>
+        <para>
+         Monitoring-only label indicating which ratio matched the chosen
+         <structfield>autovacuum_priority_score</structfield>
+        </para></entry>
+       </row>
+      </tbody>
+     </tgroup>
+    </table>
 
  </sect2>
 
