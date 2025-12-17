@@ -2,7 +2,7 @@
 
 Work Title: Autovacuum Monitoring View
 Feature Slug: autovacuum-monitoring-view
-Target Branch: auto
+Target Branch: feature/autovacuum-monitoring-view
 Workflow Mode: full
 Review Strategy: local
 Handoff Mode: manual
