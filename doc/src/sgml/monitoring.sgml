@@ -4199,26 +4199,27 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
  </sect2>
 
-   <sect2 id="monitoring-pg-stat-autovacuum-candidates-view">
-    <title><structname>pg_stat_autovacuum_candidates</structname></title>
+ <sect2 id="monitoring-pg-stat-autovacuum-candidates-view">
+  <title><structname>pg_stat_autovacuum_candidates</structname></title>
 
-    <indexterm>
-     <primary>pg_stat_autovacuum_candidates</primary>
-    </indexterm>
+  <indexterm>
+   <primary>pg_stat_autovacuum_candidates</primary>
+  </indexterm>
 
-    <para>
-     The <structname>pg_stat_autovacuum_candidates</structname> view contains
-     one row for each relation in the current database that is eligible for
-     autovacuum (ordinary tables, materialized views, and TOAST tables).
-     It exposes the raw churn counters and the computed VACUUM/ANALYZE
-     thresholds used by autovacuum decision-making, plus monitoring-only
-     ratios and a sortable priority score.
-    </para>
+  <para>
+   The <structname>pg_stat_autovacuum_candidates</structname> view contains
+   one row for each relation in the current database that is eligible for
+   autovacuum (ordinary tables, materialized views, and TOAST tables).
+   It exposes the raw churn counters and the computed thresholds used by
+   autovacuum to decide when to run <command>VACUUM</command> and
+   <command>ANALYZE</command>, plus monitoring-only ratios and a sortable
+   priority score.
+  </para>
 
-    <para>
-     Access to this view is restricted to roles that are members of
-     <structname>pg_read_all_stats</structname>.
-    </para>
+  <para>
+   Access to this view is restricted to superusers and roles with privileges
+   of built-in role <link linkend="predefined-role-pg-monitor"><literal>pg_read_all_stats</literal></link>.
+  </para>
 
     <table id="pg-stat-autovacuum-candidates-view" xreflabel="pg_stat_autovacuum_candidates">
      <title><structname>pg_stat_autovacuum_candidates</structname> View</title>
@@ -4353,7 +4354,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         </para>
         <para>
          Threshold for dead tuples above which autovacuum would consider
-         VACUUM due
+         <command>VACUUM</command> due
         </para></entry>
        </row>
 
@@ -4363,8 +4364,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         </para>
         <para>
          Threshold for inserted tuples above which autovacuum would consider
-         VACUUM due; <literal>NULL</literal> when the insert-trigger VACUUM
-         mechanism is disabled
+         <command>VACUUM</command> due; <literal>NULL</literal> when the
+         insert-trigger <command>VACUUM</command> mechanism is disabled
         </para></entry>
        </row>
 
@@ -4374,7 +4375,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         </para>
         <para>
          Threshold for modified tuples above which autovacuum would consider
-         ANALYZE due; for TOAST tables this is always <literal>NULL</literal>
+         <command>ANALYZE</command> due; for TOAST tables this is always
+         <literal>NULL</literal>
         </para></entry>
        </row>
 
@@ -4421,7 +4423,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
          <structfield>vacuum_due</structfield> <type>boolean</type>
         </para>
         <para>
-         Whether autovacuum would currently consider VACUUM due for this relation
+         Whether autovacuum would currently consider <command>VACUUM</command>
+         due for this relation
         </para></entry>
        </row>
 
@@ -4430,7 +4433,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
          <structfield>analyze_due</structfield> <type>boolean</type>
         </para>
         <para>
-         Whether autovacuum would currently consider ANALYZE due for this relation
+         Whether autovacuum would currently consider <command>ANALYZE</command>
+         due for this relation
         </para></entry>
        </row>
 
@@ -4439,8 +4443,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
          <structfield>wraparound_forced</structfield> <type>boolean</type>
         </para>
         <para>
-         Whether VACUUM is forced to prevent transaction ID or multixact ID
-         wraparound
+         Whether <command>VACUUM</command> is forced to prevent transaction ID
+         or multixact ID wraparound
         </para></entry>
        </row>
 
@@ -4500,7 +4504,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
      </tgroup>
     </table>
 
-   </sect2>
+ </sect2>
 
  <sect2 id="monitoring-pg-stat-all-indexes-view">
   <title><structname>pg_stat_all_indexes</structname></title>
